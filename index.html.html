@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>AR Empathy — Lagos Layers</title>
+<style>
+        body { margin:0; overflow:hidden; font-family:Arial,sans-serif; background:#000; color:#fff; }
+        #ar-view { position:relative; width:100vw; height:100vh; }
+        #video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+        #overlay {
+            position:absolute; inset:0; pointer-events:none; display:flex; flex-direction:column;
+            justify-content:center; align-items:center; background:rgba(0,0,0,0.65); transition:opacity .4s;
+            opacity:0; padding:20px; box-sizing:border-box;
+        }
+        #overlay.visible { opacity:1; pointer-events:auto; }
+        #story { font-size:1.35em; text-align:center; max-width:90%; line-height:1.45; margin-bottom:20px; }
+        #controls { display:flex; gap:12px; flex-wrap:wrap; justify-content:center; align-items:center; }
+        button {
+            padding:10px 22px; font-size:1em; background:rgba(255,255,255,0.18); color:#fff;
+            border:none; border-radius:30px; cursor:pointer; backdrop-filter:blur(5px);
+            transition:all .2s;
+        }
+        button:hover { background:rgba(255,255,255,0.35); }
+        button.active { background:#4CAF50; }
+        select, button { min-width:120px; }
+        #voice-select { padding:10px; border-radius:30px; background:rgba(255,255,255,0.18); color:#fff; border:none; backdrop-filter:blur(5px); font-size:1em; }
+        #loc-info {
+            position:absolute; top:12px; left:12px; background:rgba(0,0,0,0.65);
+            padding:8px 14px; border-radius:16px; font-size:0.9em; backdrop-filter:blur(5px);
+        }
+        #error-msg { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center; padding:24px; font-size:1.1em; }
+        #status { font-size:0.9em; margin-top:10px; opacity:0.8; }
+</style>
+</head>
+<body>
+<div id="ar-view">
+<video id="video" autoplay playsinline muted></video>
+<div id="overlay">
+<div id="story"></div>
+<div id="controls">
+<select id="voice-select">
+<option value="">Loading voices...</option>
+</select>
+<button id="play-audio">Play Narration</button>
+<button id="stop-audio">Stop</button>
+<button onclick="hideStory()">Close</button>
+</div>
+<div id="status"></div>
+</div>
+<div id="loc-info">Detecting location...</div>
+<div id="timeline-btns" style="position:absolute; bottom:20px; left:50%; transform:translateX(-50%); display:flex; gap:12px; flex-wrap:wrap; justify-content:center; pointer-events:auto;">
+<button data-timeline="past">Past</button>
+<button data-timeline="present">Present</button>
+<button data-timeline="future">Future</button>
+</div>
+<div id="error-msg" style="display:none;">Camera or location access denied.<br>Please enable permissions and refresh.</div>
+</div>
+
+<script>
+        const video = document.getElementById('video');
+        const overlay = document.getElementById('overlay');
+        const storyEl = document.getElementById('story');
+        const locInfo = document.getElementById('loc-info');
+        const errorMsg = document.getElementById('error-msg');
+        const voiceSelect = document.getElementById('voice-select');
+        const playBtn = document.getElementById('play-audio');
+        const stopBtn = document.getElementById('stop-audio');
+        const statusEl = document.getElementById('status');
+
+        // Lagos landmarks with stories
+        const landmarks = [
+            { key: '6.4541,3.3947', name: 'Central Lagos area',
+              past: 'In the 19th century, this was a thriving trading port shaped by Yoruba kings, Portuguese merchants, and later British colonial rule. The area buzzed with markets and the echoes of the Atlantic slave trade.',
+              present: 'Today it pulses with energy — danfo buses honking, traders calling, people weaving through traffic. Community resilience shines amid daily challenges like congestion and power cuts.',
+              future: 'Envision greener streets, elevated rail systems, flood barriers, and tech hubs turning Lagos into a sustainable African megacity.' },
+
+            { key: '6.4472,3.4014', name: 'Tafawa Balewa Square',
+              past: 'Once the Race Course under British rule, this square witnessed Nigeria’s 1960 independence celebrations and the 1914 amalgamation of Northern and Southern Nigeria.',
+              present: 'A grand open space for national events, parades, and public gatherings surrounded by echoes of colonial architecture.',
+              future: 'A revitalized civic heart with solar-powered lighting, cultural festivals, and inclusive public art promoting national unity.' },
+
+            { key: '6.4654,3.4064', name: 'Lagos Island vicinity',
+              past: 'Ancient Awori Yoruba fishing villages grew into a major Atlantic port city under the Oba of Lagos and colonial influence.',
+              present: 'A dense blend of historic mosques, churches, markets, skyscrapers — the economic engine of Nigeria with vibrant street life.',
+              future: 'Smart infrastructure, mangrove restoration projects, and equitable urban planning to support a growing, climate-resilient population.' },
+
+            { key: 'default', name: 'Lagos general',
+              past: 'From pre-colonial settlements to a key slave-trade port and post-independence boomtown, Lagos layers centuries of transformation.',
+              present: 'A chaotic, creative, multicultural metropolis full of hustle, joy, music, and community strength.',
+              future: 'Sustainable visions: renewable energy markets, better drainage, green spaces, and inclusive growth for all Lagosians.' }
+        ];
+
+        let currentKey = 'default';
+        let currentUtterance = null;
+        let voices = [];
+        let preferredVoices = [];
+
+        const synth = window.speechSynthesis;
+
+        function populateVoices() {
+            voices = synth.getVoices();
+            if (voices.length === 0) return;
+
+            voiceSelect.innerHTML = '<option value="">Select Voice</option>';
+
+            // Prioritize Nigerian English (en-NG), then other African/English variants, then general en-*
+            preferredVoices = voices.filter(v => v.lang === 'en-NG');
+            if (preferredVoices.length === 0) {
+                preferredVoices = voices.filter(v => v.lang.startsWith('en-') && (v.lang.includes('NG') || v.lang.includes('KE') || v.lang.includes('ZA') || v.lang.includes('GH')));
+            }
+            if (preferredVoices.length === 0) {
+                preferredVoices = voices.filter(v => v.lang.startsWith('en-'));
+            }
+            // Fallback to all voices
+            const displayVoices = preferredVoices.length > 0 ? preferredVoices : voices;
+
+            displayVoices.forEach((voice, i) => {
+                const option = document.createElement('option');
+                option.value = i; // index in full voices list
+                let label = voice.name;
+                if (voice.lang) label += ` (${voice.lang})`;
+                if (voice.default) label += ' — Default';
+                option.textContent = label;
+                // Auto-select best Nigerian-ish if available
+                if (voice.lang === 'en-NG' || (preferredVoices.length > 0 && preferredVoices[0] === voice)) {
+                    option.selected = true;
+                }
+                voiceSelect.appendChild(option);
+            });
+
+            statusEl.textContent = preferredVoices.length > 0 
+                ? `Found ${preferredVoices.length} preferred English voice(s) — Nigerian accents prioritized where available!`
+                : `Using general voices (Nigerian-specific may need device TTS settings).`;
+        }
+
+        // Voices load async in many browsers
+        if (synth.onvoiceschanged !== undefined) {
+            synth.onvoiceschanged = populateVoices;
+        }
+        // Call immediately in case already loaded
+        setTimeout(populateVoices, 100);
+        setTimeout(populateVoices, 500); // extra safety
+
+        async function startAR() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = stream;
+            } catch (e) {
+                console.error('Camera error:', e);
+                errorMsg.style.display = 'block';
+            }
+        }
+
+        function updateLocation() {
+            if (!navigator.geolocation) {
+                locInfo.textContent = 'Geolocation not supported.';
+                return;
+            }
+            navigator.geolocation.getCurrentPosition(pos => {
+                const lat = pos.coords.latitude.toFixed(4);
+                const lon = pos.coords.longitude.toFixed(4);
+                currentKey = `${lat},${lon}`;
+                locInfo.textContent = `Near: ${lat}, ${lon}`;
+            }, () => {
+                locInfo.textContent = 'Location denied — using default.';
+                errorMsg.style.display = 'block';
+            }, { enableHighAccuracy: true, timeout: 10000 });
+        }
+
+        function showStory(timeline) {
+            const match = landmarks.find(lm => lm.key === currentKey) || landmarks.find(lm => lm.key === 'default');
+            const text = match[timeline] || 'No story for this timeline.';
+            storyEl.textContent = text;
+            overlay.classList.add('visible');
+
+            if (currentUtterance) synth.cancel();
+            currentUtterance = new SpeechSynthesisUtterance(text);
+
+            // Select voice: preferred if available, else user choice or first good one
+            let selectedVoice;
+            const selectedIndex = voiceSelect.value;
+            if (selectedIndex !== ''&& voices[selectedIndex]) {
+                selectedVoice = voices[selectedIndex];
+            } else if (preferredVoices.length > 0) {
+                selectedVoice = preferredVoices[0];
+            } else if (voices.length > 0) {
+                selectedVoice = voices.find(v => v.lang.startsWith('en-')) || voices[0];
+            }
+            if (selectedVoice) {
+                currentUtterance.voice = selectedVoice;
+            }
+
+            currentUtterance.lang = 'en-NG'; // Hint Nigerian English if voice supports
+            currentUtterance.rate = 0.92;    // Natural pace for narration
+            currentUtterance.pitch = 1.05;   // Slight warmth
+            currentUtterance.volume = 0.95;
+        }
+
+        function playNarration() {
+            if (!currentUtterance) return;
+            synth.cancel();
+            synth.speak(currentUtterance);
+        }
+
+        function stopNarration() {
+            synth.cancel();
+        }
+
+        function hideStory() {
+            overlay.classList.remove('visible');
+            synth.cancel();
+        }
+
+        // Event listeners
+        document.querySelectorAll('#timeline-btns button').forEach(btn => {
+            btn.addEventListener('click', () => showStory(btn.dataset.timeline));
+        });
+
+        playBtn.addEventListener('click', playNarration);
+        stopBtn.addEventListener('click', stopNarration);
+
+        // Start
+        startAR();
+        updateLocation();
+</script>
+</body>
+</html>
